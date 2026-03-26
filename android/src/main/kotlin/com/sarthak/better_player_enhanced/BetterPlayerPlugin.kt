@@ -39,7 +39,10 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
     private var activity: Activity? = null
     private var pipHandler: Handler? = null
     private var pipRunnable: Runnable? = null
+    private var currentPipPlayer: BetterPlayer? = null
+
     override fun onAttachedToEngine(binding: FlutterPluginBinding) {
+        instance = this
         val loader = FlutterLoader()
         flutterState = FlutterState(
             binding.applicationContext,
@@ -71,6 +74,7 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         releaseCache()
         flutterState?.stopListening()
         flutterState = null
+        instance = null
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
@@ -408,6 +412,7 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
 
     private fun enablePictureInPicture(player: BetterPlayer) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            currentPipPlayer = player
             player.setupMediaSession(flutterState!!.applicationContext, getTextureId(player))
             activity!!.enterPictureInPictureMode(PictureInPictureParams.Builder().build())
             startPictureInPictureListenerTimer(player)
@@ -417,6 +422,7 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
 
     private fun disablePictureInPicture(player: BetterPlayer) {
         stopPipHandler()
+        if (currentPipPlayer === player) currentPipPlayer = null
         activity!!.moveTaskToBack(false)
         player.onPictureInPictureStatusChanged(false)
         player.disposeMediaSession()
@@ -429,6 +435,7 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
                 if (activity!!.isInPictureInPictureMode) {
                     pipHandler!!.postDelayed(pipRunnable!!, 100)
                 } else {
+                    if (currentPipPlayer === player) currentPipPlayer = null
                     player.onPictureInPictureStatusChanged(false)
                     player.disposeMediaSession()
                     stopPipHandler()
@@ -439,10 +446,22 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
     }
 
     private fun dispose(player: BetterPlayer, textureId: Long) {
+        if (currentPipPlayer === player) currentPipPlayer = null
         player.dispose()
         videoPlayers.remove(textureId)
         dataSources.remove(textureId)
         stopPipHandler()
+    }
+
+    /**
+     * Handles PiP stash/unstash state (Android 12+).
+     * When PiP is slid to the edge (stashed), video pauses; when slid back (unstashed), video resumes.
+     * Must be called from Activity.onPictureInPictureUiStateChanged().
+     */
+    internal fun onPictureInPictureUiStateChanged(isStashed: Boolean) {
+        currentPipPlayer?.let { player ->
+            if (isStashed) player.pause() else player.play()
+        }
     }
 
     private fun stopPipHandler() {
@@ -481,6 +500,18 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
     }
 
     companion object {
+        @Volatile
+        var instance: BetterPlayerPlugin? = null
+            private set
+
+        /**
+         * Call this from Activity.onPictureInPictureUiStateChanged() to enable
+         * pause-on-stash / resume-on-unstash (Android 12+).
+         */
+        fun handlePictureInPictureUiStateChanged(isStashed: Boolean) {
+            instance?.onPictureInPictureUiStateChanged(isStashed)
+        }
+
         private const val TAG = "BetterPlayerPlugin"
         private const val CHANNEL = "better_player_channel"
         private const val EVENTS_CHANNEL = "better_player_channel/videoEvents"
